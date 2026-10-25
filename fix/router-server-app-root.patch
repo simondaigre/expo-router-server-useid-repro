@@ -1,0 +1,212 @@
+--- a/build/server/renderStreamingContent.js	2026-10-25 22:56:52.956046384 +0100
++++ b/build/server/renderStreamingContent.js	2026-10-25 22:56:52.957078315 +0100
+@@ -84,7 +84,7 @@
+     return data;
+ }
+ function _react() {
+-    const data = /*#__PURE__*/ _interop_require_default(require("react"));
++    const data = /*#__PURE__*/ _interop_require_wildcard(require("react"));
+     _react = function() {
+         return data;
+     };
+@@ -165,14 +165,7 @@
+     element, getStyleElement } = (0, _static().registerStaticRootComponent)(_exporouter().ExpoRoot, {
+         location,
+         context: _ctx().ctx,
+-        wrapper: ({ children })=>/*#__PURE__*/ (0, _jsxruntime().jsx)(Root, {
+-                pathname: pathname,
+-                params: params,
+-                children: /*#__PURE__*/ (0, _jsxruntime().jsx)("div", {
+-                    id: "root",
+-                    children: children
+-                })
+-            })
++        wrapper: _react().Fragment
+     });
+     resetReactNavigationContexts();
+     const loaderKey = options.loader ? options.loader.key + location.search : null;
+@@ -183,9 +176,86 @@
+         headContext,
+         element,
+         getStyleElement,
+-        loadedData
++        loadedData,
++        Root,
++        pathname,
++        params
++    };
++}
++const APP_PLACEHOLDER = '<!--expo-router-app-->';
++// Rendered without a document, the app's stream starts with the elements React hoists into the
++// `<head>` of a document: `<title>`, `<meta>`, `<link>` (preloads, `precedence` stylesheets),
++// `<base>` and `<style>`.
++const HOISTABLE_ELEMENTS = /^(?:<(?:link|meta|base)\b[^>]*>|<(title|style)\b[^>]*>[\s\S]*?<\/\1>)*/;
++const SHELL_FLUSHED = Symbol('shell flushed');
++/**
++ * Reads the chunks that React sends in its first flush: the shell, or the whole app once
++ * `allReady` resolves. React writes a flush synchronously, so a read that does not resolve
++ * before the next macrotask belongs to a later flush.
++ */ async function readFirstFlush(reader) {
++    const chunks = [];
++    let next = reader.read();
++    while(next){
++        const result = chunks.length ? await Promise.race([
++            next,
++            new Promise((resolve)=>setTimeout(resolve, 0, SHELL_FLUSHED))
++        ]) : await next;
++        if (result === SHELL_FLUSHED) {
++            break;
++        }
++        if (result.done) {
++            next = null;
++        } else {
++            chunks.push(result.value);
++            next = reader.read();
++        }
++    }
++    const bytes = new Uint8Array(chunks.reduce((length, chunk)=>length + chunk.byteLength, 0));
++    let offset = 0;
++    for (const chunk of chunks){
++        bytes.set(chunk, offset);
++        offset += chunk.byteLength;
++    }
++    return {
++        bytes,
++        next
+     };
+ }
++/**
++ * Streams the document with the app in `#root`, in the order of a document rendered as one root:
++ * the elements the app hoists go in the `<head>`, the rest of the document follows the app's first
++ * flush, and the app's later flushes come before `</body>`.
++ */ async function createPageStream(beforeApp, afterApp, appReader) {
++    const encoder = new TextEncoder();
++    const firstFlush = await readFirstFlush(appReader);
++    const hoisted = HOISTABLE_ELEMENTS.exec(new TextDecoder().decode(firstFlush.bytes))?.[0] ?? '';
++    const headEnd = beforeApp.lastIndexOf('</head>');
++    const head = headEnd === -1 ? beforeApp : beforeApp.slice(0, headEnd) + hoisted + beforeApp.slice(headEnd);
++    const app = headEnd === -1 ? firstFlush.bytes : firstFlush.bytes.subarray(encoder.encode(hoisted).byteLength);
++    const bodyEnd = afterApp.lastIndexOf('</body>');
++    const documentEnd = bodyEnd === -1 ? '' : afterApp.slice(bodyEnd);
++    let next = firstFlush.next;
++    return new ReadableStream({
++        start (controller) {
++            controller.enqueue(encoder.encode(head));
++            controller.enqueue(app);
++            controller.enqueue(encoder.encode(bodyEnd === -1 ? afterApp : afterApp.slice(0, bodyEnd)));
++        },
++        async pull (controller) {
++            const result = next ? await next : null;
++            if (!result || result.done) {
++                controller.enqueue(encoder.encode(documentEnd));
++                controller.close();
++            } else {
++                controller.enqueue(result.value);
++                next = appReader.read();
++            }
++        },
++        cancel (reason) {
++            return appReader.cancel(reason);
++        }
++    });
++}
+ function FontResources() {
+     // NOTE(@hassankhan): runs once during the shell pass; fonts loaded inside late-resolving
+     // Suspense boundaries register after this and won't be emitted.
+@@ -195,7 +265,7 @@
+ }
+ async function getStreamingContent(location, options) {
+     return _server().withServerContext(async ()=>{
+-        const { headContext, element, getStyleElement, loadedData } = prepareRenderContext(location, options);
++        const { headContext, element, getStyleElement, loadedData, Root, pathname, params } = prepareRenderContext(location, options);
+         const { headNodes: cssNodes } = (0, _react1.createInjectedCssAsNodes)((0, _private().normalizeCssAssets)(options.assets));
+         const faviconNode = options.assets?.favicon ? (0, _react1.createFaviconAsNode)(options.assets?.favicon) : undefined;
+         const { headNodes: headJsNodes, bodyNodes: bodyJsNodes } = (0, _react1.createInjectedScriptAsNodes)(options.assets?.js ?? []);
+@@ -218,21 +288,8 @@
+         };
+         const isStatic = options.output === 'static';
+         const renderErrors = [];
+-        const stream = await _server2().default.renderToReadableStream(/*#__PURE__*/ (0, _jsxruntime().jsx)(_server1().ServerDocument, {
+-            data: serverDocumentData,
+-            children: /*#__PURE__*/ (0, _jsxruntime().jsx)(_head().default.Provider, {
+-                context: headContext,
+-                children: /*#__PURE__*/ (0, _jsxruntime().jsx)(_static().InnerRoot, {
+-                    loadedData: loadedData,
+-                    children: element
+-                })
+-            })
+-        }), {
++        const renderOptions = {
+             progressiveChunkSize: Number.MAX_SAFE_INTEGER,
+-            bootstrapScriptContent: (0, _react1.getBootstrapContents)({
+-                hydrate: options.hydrate ?? true,
+-                loadedData
+-            }) || undefined,
+             signal: options.request?.signal,
+             onError (error) {
+                 if (options.request?.signal.aborted) {
+@@ -244,13 +301,61 @@
+                     console.error('SSR streaming render error:', error);
+                 }
+             }
+-        });
++        };
++        // The browser hydrates `#root` as a root of its own. React derives `useId` values from the
++        // position of a component in its root, so the server renders the app as a root of its own too,
++        // then the document around it.
++        const appStream = await _server2().default.renderToReadableStream(/*#__PURE__*/ (0, _jsxruntime().jsx)(_server1().ServerDocument, {
++            data: serverDocumentData,
++            children: /*#__PURE__*/ (0, _jsxruntime().jsx)(_head().default.Provider, {
++                context: headContext,
++                children: /*#__PURE__*/ (0, _jsxruntime().jsx)(_static().InnerRoot, {
++                    loadedData: loadedData,
++                    children: element
++                })
++            })
++        }), renderOptions);
++        const appReader = appStream.getReader();
++        let stream;
++        try {
++            if (isStatic) {
++                await appStream.allReady;
++            }
++            const documentStream = await _server2().default.renderToReadableStream(/*#__PURE__*/ (0, _jsxruntime().jsx)(_server1().ServerDocument, {
++                data: serverDocumentData,
++                children: /*#__PURE__*/ (0, _jsxruntime().jsx)(Root, {
++                    pathname: pathname,
++                    params: params,
++                    children: /*#__PURE__*/ (0, _jsxruntime().jsx)("div", {
++                        id: "root",
++                        dangerouslySetInnerHTML: {
++                            __html: APP_PLACEHOLDER
++                        }
++                    })
++                })
++            }), {
++                ...renderOptions,
++                bootstrapScriptContent: (0, _react1.getBootstrapContents)({
++                    hydrate: options.hydrate ?? true,
++                    loadedData
++                }) || undefined
++            });
++            const documentParts = (await new Response(documentStream).text()).split(APP_PLACEHOLDER);
++            if (documentParts.length !== 2) {
++                throw new Error(`The root HTML component (\`+html\`) rendered its \`children\` ${documentParts.length - 1} times. ` + 'Expo Router renders the app in its `children`, so it must render them exactly once. ' + 'Render `{children}` once inside `<body>`.');
++            }
++            const [beforeApp = '', afterApp = ''] = documentParts;
++            stream = await createPageStream(beforeApp, afterApp, appReader);
++        } catch (error) {
++            await appReader.cancel(error).catch(()=>{});
++            throw error;
++        }
+         if (isStatic) {
+-            await stream.allReady;
++            const html = await new Response(stream).text();
+             if (renderErrors.length > 0) {
+                 throw renderErrors[0];
+             }
+-            return new Response(stream).text();
++            return html;
+         }
+         return stream;
+     });

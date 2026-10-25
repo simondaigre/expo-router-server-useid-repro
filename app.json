@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "expo-router-server-useid-repro",
+    "slug": "expo-router-server-useid-repro",
+    "version": "1.0.0",
+    "scheme": "exporouterserveruseidrepro",
+    "web": {
+      "output": "server"
+    },
+    "plugins": ["expo-router"]
+  }
+}
